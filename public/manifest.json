@@ -1,0 +1,20 @@
+{
+  "name": "Pesa AI — SMS Payments on HashKey Chain",
+  "short_name": "Pesa AI",
+  "description": "Send money with a text. Settled on HashKey Chain via HSP PayFi.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#F59E0B",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"],
+  "lang": "en"
+}
