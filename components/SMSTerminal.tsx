@@ -102,8 +102,14 @@ export default function SMSTerminal({ wallet, locale }: Props) {
     setMessages([{ id: "welcome", type: "received", text: t(locale, "welcomeMsg") }]);
   }, [locale]);
 
+  // Clear any stale queued payments on mount — prevents ghost transactions
   useEffect(() => {
-    const onOnline  = () => { setIsOnline(true); void flushQueue(); };
+    const { clearQueue } = require("@/lib/queue");
+    clearQueue();
+  }, []);
+
+  useEffect(() => {
+    const onOnline  = () => { setIsOnline(true); };  // don't auto-flush — user must explicitly retry
     const onOffline = () => setIsOnline(false);
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
@@ -112,8 +118,7 @@ export default function SMSTerminal({ wallet, locale }: Props) {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet]);
+  }, []); // no wallet dependency — prevents re-triggering on wallet state changes
 
   const pushMessage = (msg: Message) => {
     setMessages((prev) => [...prev, msg]);
@@ -219,7 +224,7 @@ export default function SMSTerminal({ wallet, locale }: Props) {
       pushMessage({ id: uid(), type: "system", text: `TX: ${formatAddress(tx.hash)} — confirming...` });
       const receipt = await tx.wait();
       if (receipt?.status === 1) {
-        if (queueId) dequeue(queueId);
+        if (queueId) dequeue(queueId);  // remove from queue immediately on success
         track({ type: "tx_success", token: useHSP ? "HSP" : "HSK", amount: ethers.formatEther(amount), ts: Date.now() });
         pushMessage({
           id: uid(), type: "received",

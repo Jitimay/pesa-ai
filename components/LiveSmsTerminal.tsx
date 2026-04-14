@@ -42,12 +42,13 @@ function fraudBadge(level?: string) {
 }
 
 export default function LiveSmsTerminal({ wallet }: Props) {
-  const [events, setEvents]       = useState<SmsEvent[]>([]);
-  const [settling, setSettling]   = useState<string | null>(null); // event id being settled
-  const [error, setError]         = useState("");
-  const [open, setOpen]           = useState(true);
-  const seenIds                   = useRef<Set<string>>(new Set());
-  const listRef                   = useRef<HTMLDivElement>(null);
+  const [events, setEvents]     = useState<SmsEvent[]>([]);
+  const [settling, setSettling] = useState<string | null>(null);
+  const [error, setError]       = useState("");
+  const [open, setOpen]         = useState(true);
+  const [lastPoll, setLastPoll] = useState<Date | null>(null);
+  const seenIds  = useRef<Set<string>>(new Set());
+  const listRef  = useRef<HTMLDivElement>(null);
 
   // ── Poll for new SMS events ─────────────────────────────────────────────────
   const poll = useCallback(async () => {
@@ -56,10 +57,12 @@ export default function LiveSmsTerminal({ wallet }: Props) {
       if (!res.ok) return;
       const data = (await res.json()) as { events: SmsEvent[] };
       setEvents(data.events);
+      setLastPoll(new Date());
       // Scroll to top on new event
       const newIds = data.events.filter((e) => !seenIds.current.has(e.id));
       if (newIds.length > 0) {
         newIds.forEach((e) => seenIds.current.add(e.id));
+        setOpen(true); // auto-expand on new SMS
         if (listRef.current) listRef.current.scrollTop = 0;
       }
     } catch { /* silent */ }
@@ -176,8 +179,15 @@ export default function LiveSmsTerminal({ wallet }: Props) {
           {/* Connection info */}
           <div className="flex items-center gap-2 border-b border-pesa-border px-4 py-2 text-xs text-pesa-muted">
             <span className="inline-block h-2 w-2 rounded-full bg-pesa-success animate-pulseSoft" />
-            <span>Polling <code className="text-pesa-accent">/api/sms-webhook/events</code> every 3s</span>
-            <span className="ml-auto">Webhook: <code className="text-pesa-accent">POST /api/sms-webhook</code></span>
+            <span>Live — polling every 3s</span>
+            {lastPoll && (
+              <span className="text-pesa-border">
+                last: {lastPoll.toLocaleTimeString()}
+              </span>
+            )}
+            <span className="ml-auto">
+              <code className="text-pesa-accent">POST /api/sms-webhook</code>
+            </span>
           </div>
 
           {error && (
@@ -303,7 +313,7 @@ export default function LiveSmsTerminal({ wallet }: Props) {
             <p className="font-semibold text-pesa-text mb-1">ESP32 / Andasy.io setup:</p>
             <p>In your Python server, after parsing the SMS, POST to:</p>
             <code className="mt-1 block rounded bg-[#0d1117] px-2 py-1 text-pesa-accent">
-              POST {typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app"}/api/sms-webhook
+              POST [your-app-url]/api/sms-webhook
             </code>
             <code className="mt-1 block rounded bg-[#0d1117] px-2 py-1 text-pesa-muted">
               {`{ "sender": "+25761234567", "message": "SEND 10 HSP TO 0x..." }`}

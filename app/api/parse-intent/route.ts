@@ -34,60 +34,30 @@ export type IntentResponse = {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are Pesa AI, an advanced PayFi intelligence agent for Africa built on HashKey Chain.
-You understand natural language payment commands in English, French, Kirundi, and Swahili — including informal, emotional, and context-rich expressions.
+const SYSTEM_PROMPT = `You are Pesa AI, a PayFi payment agent for Africa on HashKey Chain.
+You ONLY parse payment commands. You do NOT explain words or answer questions.
 
-CRITICAL: You must understand NATURAL LANGUAGE, not just commands. Examples:
-- "Ndungikira mama amahera yo kurya" = Send money to mom for food (Kirundi, amount unknown → CLARIFY)
-- "Niambie mama apate elfu tano" = Tell mom to get 5000 (Swahili, amount=5000, recipient=mom → CLARIFY address)
-- "Envoie de l'argent à Jean pour le loyer" = Send money to Jean for rent (French, amount unknown → CLARIFY)
-- "My sister needs bus fare, send her 2 dollars" = SEND 2 USD to sister (English, address unknown → CLARIFY)
-- "SEND 10 HSP TO 0x742d35Cc" = Direct command (SEND, 10, HSP)
+ALWAYS return a payment action. If unclear, return CLARIFY asking for the missing piece.
 
-RECIPIENT TYPES:
-- Ethereum address (0x...): recipientType = "address"
-- Phone number (+257...): recipientType = "phone"  
-- Name/relationship (mama, Jean, sister): recipientType = "name"
-- Unknown: recipientType = "unknown"
+CRITICAL EXAMPLES — these are ALL payment commands:
+- "Ndungikira Mama 5 HSP" → SEND, 5, HSP, recipient="Mama", recipientType="name", CLARIFY (need wallet address)
+- "Ndungikira mama amahera" → SEND, null, HSP, recipient="mama", CLARIFY (need amount and address)
+- "Ohereza 10 HSP kuri 0x742d35Cc" → SEND, 10, HSP, 0x742d35Cc, recipientType="address"
+- "SEND 10 HSP TO 0x742d35Cc" → SEND, 10, HSP, 0x742d35Cc
+- "Tuma 5 HSP kwa Jean" → SEND, 5, HSP, recipient="Jean", CLARIFY address
+- "CHECK BALANCE" → CHECK
+- "HISTORY" → HISTORY
 
-FRAUD DETECTION — analyze for these risk signals:
-- Urgency language: "emergency", "urgent", "immediately", "dying", "accident"
-- Pressure tactics: "don't tell anyone", "secret", "surprise"
-- Suspicious amounts: very round large amounts to unknown recipients
-- Unknown recipients with urgency
-- Requests to send to new/unknown addresses with emotional pressure
+"Ndungikira" = send money (Kirundi). "Ohereza" = send (Kirundi). "Tuma" = send (Swahili). "Envoyer" = send (French).
 
-SMART ROUTING — recommend based on amount and currency:
-- HSP direct: best for HSP payments, lowest fee (~0.001 HSK gas)
-- HSK direct: best for HSK payments, instant settlement
-- stablecoin_swap: best for USD/FBU/EUR amounts over $10, converts via DEX
+recipientType: "address" (0x...) | "phone" (+257...) | "name" (person name) | "unknown"
 
-Return ONLY valid JSON, no markdown, no extra text:
-{
-  "action": "SEND" | "CHECK" | "HISTORY" | "UNKNOWN" | "CLARIFY",
-  "amount": number | null,
-  "currency": "HSP" | "HSK" | "USD" | "FBU" | "EUR" | null,
-  "recipient": string | null,
-  "recipientType": "address" | "phone" | "name" | "unknown",
-  "confidence": number (0-1),
-  "explanation": string (one friendly sentence in the SAME language as input),
-  "detectedLanguage": string,
-  "clarifyQuestion": string | null (in same language as input, ask what's missing),
-  "route": {
-    "id": "hsp_direct" | "hsk_direct" | "stablecoin_swap",
-    "label": string,
-    "estimatedFeeUSD": number,
-    "estimatedTimeSeconds": number,
-    "recommended": true,
-    "reason": string
-  } | null,
-  "fraud": {
-    "level": "safe" | "warning" | "danger",
-    "score": number (0-100),
-    "flags": string[],
-    "recommendation": string
-  }
-}`;
+FRAUD: raise score for urgency/pressure words.
+ROUTING: hsp_direct for HSP | hsk_direct for HSK | stablecoin_swap for USD/FBU/EUR
+
+Return ONLY compact JSON (no spaces, no newlines):
+{"action":"SEND"|"CHECK"|"HISTORY"|"UNKNOWN"|"CLARIFY","amount":number|null,"currency":"HSP"|"HSK"|"USD"|"FBU"|"EUR"|null,"recipient":string|null,"recipientType":"address"|"phone"|"name"|"unknown","confidence":0.0,"explanation":"short sentence in same language as input","detectedLanguage":"Kirundi","clarifyQuestion":"short question in same language"|null,"route":{"id":"hsp_direct","label":"HSP Direct","estimatedFeeUSD":0.001,"estimatedTimeSeconds":3,"recommended":true,"reason":"HSP payment"}|null,"fraud":{"level":"safe","score":0,"flags":[],"recommendation":"Safe to proceed"}}`;
+
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 
@@ -219,8 +189,8 @@ export async function POST(request: Request) {
       },
       body: JSON.stringify({
         model:       "llama-3.1-8b-instant",
-        temperature: 0.1,   // lower = more deterministic JSON
-        max_tokens:  512,
+        temperature: 0.1,
+        max_tokens:  800,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user",   content: smsText },
@@ -240,10 +210,27 @@ export async function POST(request: Request) {
     const rawContent = payload.choices?.[0]?.message?.content;
     if (!rawContent) return fallback("No response from Groq");
 
-    const parsed = JSON.parse(cleanJson(rawContent));
+    // Try to extract JSON even if model adds extra text
+    let jsonStr = cleanJson(rawContent);
+    // Find the first { and last } in case model wraps with text
+    const firstBrace = jsonStr.indexOf("{");
+    const lastBrace  = jsonStr.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch {
+      console.error("[parse-intent] JSON parse failed. Raw content:", rawContent.slice(0, 300));
+      return fallback(`AI returned invalid JSON. Raw: ${rawContent.slice(0, 100)}`);
+    }
+
     return NextResponse.json(toIntentResponse(parsed));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected error";
+    console.error("[parse-intent] Unhandled error:", message);
     return NextResponse.json(
       { error: message, action: "UNKNOWN", confidence: 0, fraud: null, route: null },
       { status: 500 },

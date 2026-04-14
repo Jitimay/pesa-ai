@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { pushEvent, getEvents as storeGetEvents, updateEventStatus as storeUpdateStatus } from "@/lib/sms-store";
 
 /**
  * POST /api/sms-webhook
@@ -37,25 +38,13 @@ export type SmsEvent = {
   txHash?: string;
 };
 
-// In-memory ring buffer — last 50 SMS events
-const MAX_EVENTS = 50;
-const events: SmsEvent[] = [];
-
+// In-memory ring buffer — last 50 SMS events (persisted via sms-store)
 export function getEvents(): SmsEvent[] {
-  return [...events].reverse(); // newest first
+  return storeGetEvents();
 }
 
 export function updateEventStatus(id: string, status: SmsEvent["status"], txHash?: string) {
-  const ev = events.find((e) => e.id === id);
-  if (ev) {
-    ev.status = status;
-    if (txHash) ev.txHash = txHash;
-  }
-}
-
-function pushEvent(ev: SmsEvent) {
-  events.push(ev);
-  if (events.length > MAX_EVENTS) events.shift();
+  storeUpdateStatus(id, status, txHash);
 }
 
 // ── POST handler ──────────────────────────────────────────────────────────────
@@ -104,26 +93,33 @@ export async function POST(request: Request) {
 
     pushEvent(event);
 
-    // Build SMS reply for the ESP32 to send back
-    let smsReply = "Pesa AI received your message.";
+    // Build short SMS reply for ESP32 (keep under 160 chars, ASCII-safe)
+    let smsReply = "Pesa AI: message received.";
     if (parsed) {
       if (parsed.action === "SEND") {
-        const fraudWarn = parsed.fraud?.level === "danger"
-          ? "\n⚠️ HIGH RISK detected. Open app to confirm."
-          : parsed.fraud?.level === "warning"
-          ? "\n⚠️ Caution: " + (parsed.fraud.flags[0] ?? "review before sending")
-          : "";
-        smsReply = `${parsed.explanation}${fraudWarn}\nOpen app to confirm payment: pesa-ai.vercel.app`;
-      } else if (parsed.action === "CHECK") {
-        smsReply = "Open app to check your balance: pesa-ai.vercel.app";
-      } else if (parsed.action === "HISTORY") {
-        smsReply = "Open app to view history: pesa-ai.vercel.app";
+        const amt = parsed.amount ? `${parsed.amount} ${parsed.currency ?? "HSP"}` : "HSP";
+        const fraudWarn = parsed.fraud?.level === "danger" ? " RISK DETECTED." : "";
+        if (parsed.clarifyQuestion) {
+          // Strip non-ASCII for SMS safety
+          const q = (parsed.clarifyQuestion as string).replace(/[^\x00-\x7F]/g, "").trim().slice(0, 80);
+          smsReply = `Pesa AI: Send ${amt}?${fraudWarn} ${q} Open: pesa-ai.vercel.app`;
+        } else {
+          smsReply = `Pesa AI: Payment ${amt} ready.${fraudWarn} Open app to confirm: pesa-ai.vercel.app`;
+        }
       } else if (parsed.action === "CLARIFY") {
-        smsReply = parsed.explanation + (parsed.clarifyQuestion ? "\n" + parsed.clarifyQuestion : "");
+        const q = (parsed.clarifyQuestion as string ?? "Please provide more details.")
+          .replace(/[^\x00-\x7F]/g, "").trim().slice(0, 100);
+        smsReply = `Pesa AI: ${q}`;
+      } else if (parsed.action === "CHECK") {
+        smsReply = "Pesa AI: Check your balance at pesa-ai.vercel.app";
+      } else if (parsed.action === "HISTORY") {
+        smsReply = "Pesa AI: View history at pesa-ai.vercel.app";
       } else {
-        smsReply = parsed.explanation;
+        smsReply = "Pesa AI: Try: SEND 10 HSP TO 0x... or CHECK BALANCE";
       }
     }
+    // Ensure reply fits in one SMS (160 chars max)
+    smsReply = smsReply.slice(0, 155);
 
     return NextResponse.json({
       id:       event.id,
