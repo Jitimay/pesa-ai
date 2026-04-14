@@ -5,6 +5,7 @@ import AnalyticsDashboard  from "@/components/AnalyticsDashboard";
 import FaucetButton        from "@/components/FaucetButton";
 import HowItWorks          from "@/components/HowItWorks";
 import ImpactDashboard     from "@/components/ImpactDashboard";
+import LiveSmsTerminal     from "@/components/LiveSmsTerminal";
 import LocaleSwitcher      from "@/components/LocaleSwitcher";
 import NetworkGuard        from "@/components/NetworkGuard";
 import SMSTerminal         from "@/components/SMSTerminal";
@@ -108,6 +109,7 @@ export default function HomePage() {
 
       <ImpactDashboard locale={locale} />
       <HowItWorks locale={locale} />
+      <LiveSmsTerminal wallet={wallet} />
       <TransactionFeed locale={locale} />
       <AnalyticsDashboard locale={locale} />
 
