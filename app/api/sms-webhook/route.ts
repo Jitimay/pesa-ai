@@ -31,6 +31,7 @@ export type SmsEvent = {
     confidence: number;
     explanation: string;
     detectedLanguage: string;
+    clarifyQuestion?: string | null;
     fraud: { level: string; score: number; flags: string[] } | null;
     route: { id: string; label: string; estimatedFeeUSD: number } | null;
   };
@@ -38,12 +39,12 @@ export type SmsEvent = {
   txHash?: string;
 };
 
-// In-memory ring buffer — last 50 SMS events (persisted via sms-store)
-export function getEvents(): SmsEvent[] {
+// Helper functions for internal use
+function getEventsInternal(): SmsEvent[] {
   return storeGetEvents();
 }
 
-export function updateEventStatus(id: string, status: SmsEvent["status"], txHash?: string) {
+function updateEventStatusInternal(id: string, status: SmsEvent["status"], txHash?: string) {
   storeUpdateStatus(id, status, txHash);
 }
 

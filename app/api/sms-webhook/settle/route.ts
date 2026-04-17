@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { updateEventStatus } from "../route";
+import { updateEventStatus } from "@/lib/sms-store";
 
 /**
  * POST /api/sms-webhook/settle

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getEvents } from "../route";
+import { getEvents } from "@/lib/sms-store";
 
 /**
  * GET /api/sms-webhook/events

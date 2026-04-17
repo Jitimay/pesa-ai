@@ -11,7 +11,8 @@ on HashKey Chain testnet.
 
 ## Live Demo
 
-- Vercel: `https://your-vercel-demo-link.vercel.app`
+- **Production**: https://pesaai.vercel.app
+- **HashKey Chain Testnet**: https://testnet-explorer.hsk.xyz
 
 ## Tech Stack
 

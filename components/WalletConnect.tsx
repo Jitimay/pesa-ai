@@ -131,9 +131,11 @@ export default function WalletConnect({ wallet, onWalletChange, locale }: Props)
       track({ type: "wallet_connect", ts: Date.now() });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Connection failed";
-      // User rejected — don't show an error, just stay disconnected
-      if (!msg.toLowerCase().includes("user rejected")) {
-        setError(msg.slice(0, 60));
+      // -32002 = MetaMask already has a pending request open
+      if (msg.includes("-32002") || msg.includes("already pending")) {
+        setError("MetaMask has a pending request. Open MetaMask and approve or reject it first.");
+      } else if (!msg.toLowerCase().includes("user rejected")) {
+        setError(msg.slice(0, 80));
       }
     } finally {
       setIsBusy(false);
