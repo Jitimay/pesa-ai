@@ -1,22 +1,7 @@
 import { NextResponse } from "next/server";
+import { ethers } from "ethers";
 import { pushEvent, getEvents as storeGetEvents, updateEventStatus as storeUpdateStatus } from "@/lib/sms-store";
-
-/**
- * POST /api/sms-webhook
- *
- * Called by the ESP32 / Andasy.io server when a real SMS arrives.
- * Body: { sender: string, message: string, secret?: string }
- *
- * This endpoint:
- * 1. Validates the webhook secret
- * 2. Parses the SMS intent via the same AI pipeline
- * 3. Stores the event in the in-memory log (polled by the UI)
- * 4. Returns the AI parse result so the ESP32 server can reply via SMS
- *
- * For on-chain settlement: the UI polls /api/sms-webhook/events and
- * the connected wallet executes the transaction client-side.
- * This keeps private keys out of the server entirely.
- */
+import { RPC_URL, CONTRACT_ADDRESS, HSP_TOKEN_ADDRESS, PESA_AI_ABI, HSP_ABI } from "@/lib/hashkey";
 
 export type SmsEvent = {
   id: string;
@@ -39,31 +24,89 @@ export type SmsEvent = {
   txHash?: string;
 };
 
-// Helper functions for internal use
-function getEventsInternal(): SmsEvent[] {
+export function getEvents(): SmsEvent[] {
   return storeGetEvents();
 }
 
-function updateEventStatusInternal(id: string, status: SmsEvent["status"], txHash?: string) {
+export function updateEventStatus(id: string, status: SmsEvent["status"], txHash?: string) {
   storeUpdateStatus(id, status, txHash);
+}
+
+// ── Server-side wallet settlement (no MetaMask needed) ────────────────────────
+
+async function settleOnChain(event: SmsEvent): Promise<void> {
+  const privateKey = process.env.PRIVATE_KEY;
+  if (!privateKey || !CONTRACT_ADDRESS || !HSP_TOKEN_ADDRESS) {
+    console.log("[webhook] Auto-settle skipped — missing PRIVATE_KEY or contract addresses");
+    return;
+  }
+
+  const p = event.parsed;
+  if (!p || p.action !== "SEND" || p.fraud?.level === "danger") return;
+
+  // Need a valid recipient address for auto-settlement
+  const isValidAddr = p.recipient && ethers.isAddress(p.recipient);
+  if (!isValidAddr) {
+    console.log("[webhook] Auto-settle skipped — no valid recipient address");
+    return;
+  }
+
+  storeUpdateStatus(event.id, "processing");
+
+  try {
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const wallet   = new ethers.Wallet(privateKey, provider);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, PESA_AI_ABI, wallet);
+    const hsp      = new ethers.Contract(HSP_TOKEN_ADDRESS, HSP_ABI, wallet);
+
+    const currency = p.currency ?? "HSP";
+    const useHSP   = currency !== "HSK";
+    const recipient = p.recipient!;
+
+    // Convert amount
+    let amount: bigint;
+    if (currency === "HSP" || currency === "HSK") {
+      const val = p.amount && p.amount > 0 ? p.amount : 1;
+      amount = ethers.parseEther(val.toFixed(6));
+    } else {
+      const val = p.amount && p.amount > 0 ? p.amount : 1;
+      const hspAmt = currency === "FBU" ? val * 0.00035 : val;
+      amount = ethers.parseEther(Math.max(hspAmt, 0.000001).toFixed(6));
+    }
+
+    let tx;
+    if (useHSP) {
+      // Approve then transfer
+      const approveTx = await hsp.approve(CONTRACT_ADDRESS, amount);
+      await approveTx.wait();
+      tx = await contract.logPaymentHSP(recipient, amount, currency, event.message);
+    } else {
+      tx = await contract.logPaymentHSK(recipient, amount, currency, event.message, { value: amount });
+    }
+
+    const receipt = await tx.wait();
+    const ok = receipt?.status === 1;
+
+    storeUpdateStatus(event.id, ok ? "settled" : "failed", tx.hash);
+    console.log(`[webhook] Auto-settled: ${tx.hash} status=${ok ? "settled" : "failed"}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown";
+    console.error("[webhook] Auto-settle error:", msg);
+    storeUpdateStatus(event.id, "failed");
+  }
 }
 
 // ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(request: Request) {
   try {
-    // Validate webhook secret
     const secret = request.headers.get("x-webhook-secret") ?? "";
     const expectedSecret = process.env.SMS_WEBHOOK_SECRET ?? "";
     if (expectedSecret && secret !== expectedSecret) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const body = (await request.json()) as {
-      sender?: string;
-      message?: string;
-    };
-
+    const body = (await request.json()) as { sender?: string; message?: string };
     const sender  = typeof body.sender  === "string" ? body.sender.trim()  : "";
     const message = typeof body.message === "string" ? body.message.trim() : "";
 
@@ -71,17 +114,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "sender and message required" }, { status: 400 });
     }
 
-    // Parse intent using the same AI pipeline
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+    // Parse intent
+    const baseUrl  = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
     const parseRes = await fetch(`${baseUrl}/api/parse-intent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ smsText: message }),
     });
 
-    const parsed = parseRes.ok
-      ? (await parseRes.json()) as SmsEvent["parsed"]
-      : null;
+    const parsed = parseRes.ok ? (await parseRes.json()) as SmsEvent["parsed"] : null;
 
     const event: SmsEvent = {
       id:         crypto.randomUUID(),
@@ -94,40 +135,39 @@ export async function POST(request: Request) {
 
     pushEvent(event);
 
-    // Build short SMS reply for ESP32 (keep under 160 chars, ASCII-safe)
+    // Auto-settle in background — don't await, return SMS reply immediately
+    if (parsed?.action === "SEND" && parsed.fraud?.level !== "danger") {
+      void settleOnChain(event);
+    }
+
+    // Build SMS reply
     let smsReply = "Pesa AI: message received.";
     if (parsed) {
       if (parsed.action === "SEND") {
-        const amt = parsed.amount ? `${parsed.amount} ${parsed.currency ?? "HSP"}` : "HSP";
+        const amt      = parsed.amount ? `${parsed.amount} ${parsed.currency ?? "HSP"}` : "HSP";
         const fraudWarn = parsed.fraud?.level === "danger" ? " RISK DETECTED." : "";
-        if (parsed.clarifyQuestion) {
-          // Strip non-ASCII for SMS safety
+        const hasAddr   = parsed.recipient && ethers.isAddress(parsed.recipient);
+        if (parsed.clarifyQuestion && !hasAddr) {
           const q = (parsed.clarifyQuestion as string).replace(/[^\x00-\x7F]/g, "").trim().slice(0, 80);
-          smsReply = `Pesa AI: Send ${amt}?${fraudWarn} ${q} Open: pesa-ai.vercel.app`;
+          smsReply = `Pesa AI: Send ${amt}?${fraudWarn} ${q}`;
         } else {
-          smsReply = `Pesa AI: Payment ${amt} ready.${fraudWarn} Open app to confirm: pesa-ai.vercel.app`;
+          smsReply = `Pesa AI: Sending ${amt} now...${fraudWarn} Track: pesa-ai.vercel.app`;
         }
       } else if (parsed.action === "CLARIFY") {
         const q = (parsed.clarifyQuestion as string ?? "Please provide more details.")
           .replace(/[^\x00-\x7F]/g, "").trim().slice(0, 100);
         smsReply = `Pesa AI: ${q}`;
       } else if (parsed.action === "CHECK") {
-        smsReply = "Pesa AI: Check your balance at pesa-ai.vercel.app";
+        smsReply = "Pesa AI: Check balance at pesa-ai.vercel.app";
       } else if (parsed.action === "HISTORY") {
         smsReply = "Pesa AI: View history at pesa-ai.vercel.app";
       } else {
         smsReply = "Pesa AI: Try: SEND 10 HSP TO 0x... or CHECK BALANCE";
       }
     }
-    // Ensure reply fits in one SMS (160 chars max)
     smsReply = smsReply.slice(0, 155);
 
-    return NextResponse.json({
-      id:       event.id,
-      reply:    smsReply,   // ESP32 server sends this back as SMS
-      parsed,
-      status:   "pending",
-    });
+    return NextResponse.json({ id: event.id, reply: smsReply, parsed, status: "pending" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unexpected error";
     return NextResponse.json({ error: message }, { status: 500 });

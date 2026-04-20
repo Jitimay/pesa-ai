@@ -284,7 +284,7 @@ export default function LiveSmsTerminal({ wallet }: Props) {
                     </a>
                   )}
 
-                  {/* Action buttons for pending SEND */}
+                  {/* Action buttons — only show if no private key auto-settle */}
                   {ev.status === "pending" && ev.parsed?.action === "SEND" && (
                     <div className="mt-3 flex gap-2">
                       <button
@@ -301,6 +301,18 @@ export default function LiveSmsTerminal({ wallet }: Props) {
                       >
                         Cancel
                       </button>
+                    </div>
+                  )}
+
+                  {/* Processing — server is auto-settling */}
+                  {ev.status === "processing" && (
+                    <div className="mt-3 flex items-center gap-2 text-xs text-pesa-accent">
+                      <span className="inline-flex gap-1">
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pesa-accent" />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pesa-accent [animation-delay:120ms]" />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pesa-accent [animation-delay:240ms]" />
+                      </span>
+                      <span>Pesa AI is settling on-chain...</span>
                     </div>
                   )}
                 </div>
