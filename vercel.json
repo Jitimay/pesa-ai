@@ -1,5 +1,13 @@
 {
   "framework": "nextjs",
   "buildCommand": "next build",
-  "outputDirectory": ".next"
+  "outputDirectory": ".next",
+  "functions": {
+    "app/api/sms-webhook/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/parse-intent/route.ts": {
+      "maxDuration": 30
+    }
+  }
 }

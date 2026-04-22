@@ -34,6 +34,7 @@ contract PesaAI {
 
     mapping(uint256 => PaymentRecord)    public payments;
     mapping(address => uint256[])        public userPayments;
+    mapping(string => address)           public aliases; // name -> wallet
 
     uint256 public txCounter;
     uint256 public totalVolumeHSK;   // total native HSK settled (wei)
@@ -43,6 +44,7 @@ contract PesaAI {
 
     // ── Events ───────────────────────────────────────────────────────────────
 
+    event AliasRegistered(string indexed name, address indexed wallet);
     event PaymentLogged(
         uint256 indexed txId,
         address indexed sender,
@@ -76,6 +78,22 @@ contract PesaAI {
     function setHspToken(address _hspToken) external onlyOwner {
         emit HspTokenUpdated(hspToken, _hspToken);
         hspToken = _hspToken;
+    }
+
+    // ── Alias Registry ───────────────────────────────────────────────────────
+
+    /**
+     * @notice Register a human-readable name for a wallet.
+     *         In a production app, this might involve ZKID or phone verification.
+     */
+    function registerAlias(string calldata name, address wallet) external onlyOwner {
+        require(wallet != address(0), "Invalid address");
+        aliases[name] = wallet;
+        emit AliasRegistered(name, wallet);
+    }
+
+    function resolveAlias(string calldata name) external view returns (address) {
+        return aliases[name];
     }
 
     // ── Payment: native HSK ──────────────────────────────────────────────────

@@ -3,6 +3,40 @@ import { ethers } from "ethers";
 import { pushEvent, getEvents as storeGetEvents, updateEventStatus as storeUpdateStatus } from "@/lib/sms-store";
 import { RPC_URL, CONTRACT_ADDRESS, HSP_TOKEN_ADDRESS, PESA_AI_ABI, HSP_ABI } from "@/lib/hashkey";
 
+// ── Alias book — maps names to wallet addresses ───────────────────────────────
+// Add your demo contacts here
+const ALIAS_BOOK: Record<string, string> = {
+  "mama":   "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+  "maman":  "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+  "mom":    "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+  "papa":   "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+  "jean":   "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+  "alice":  "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+};
+
+async function resolveRecipient(recipient: string | null): Promise<string | null> {
+  if (!recipient) return null;
+  if (ethers.isAddress(recipient)) return recipient;
+  
+  const aliasStr: string = recipient;
+  const alias = aliasStr.toLowerCase().trim();
+
+  // 1. Try on-chain registry first
+  try {
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, PESA_AI_ABI, provider);
+    const onChainAddr = await contract.resolveAlias(alias);
+    if (onChainAddr && onChainAddr !== ethers.ZeroAddress) {
+      return onChainAddr;
+    }
+  } catch (err) {
+    console.error("[webhook] On-chain alias lookup failed:", err);
+  }
+
+  // 2. Fallback to demo book
+  return ALIAS_BOOK[alias] ?? null;
+}
+
 export type SmsEvent = {
   id: string;
   sender: string;
@@ -24,34 +58,43 @@ export type SmsEvent = {
   txHash?: string;
 };
 
-export function getEvents(): SmsEvent[] {
+function getEvents(): SmsEvent[] {
   return storeGetEvents();
 }
 
-export function updateEventStatus(id: string, status: SmsEvent["status"], txHash?: string) {
+function updateEventStatus(id: string, status: SmsEvent["status"], txHash?: string) {
   storeUpdateStatus(id, status, txHash);
 }
 
 // ── Server-side wallet settlement (no MetaMask needed) ────────────────────────
 
 async function settleOnChain(event: SmsEvent): Promise<void> {
+  console.log(`[settle] Starting for event ${event.id}`);
   const privateKey = process.env.PRIVATE_KEY;
   if (!privateKey || !CONTRACT_ADDRESS || !HSP_TOKEN_ADDRESS) {
-    console.log("[webhook] Auto-settle skipped — missing PRIVATE_KEY or contract addresses");
+    console.log("[settle] ABORT: Missing env variables");
+    storeUpdateStatus(event.id, "failed");
     return;
   }
 
   const p = event.parsed;
-  if (!p || p.action !== "SEND" || p.fraud?.level === "danger") return;
-
-  // Need a valid recipient address for auto-settlement
-  const isValidAddr = p.recipient && ethers.isAddress(p.recipient);
-  if (!isValidAddr) {
-    console.log("[webhook] Auto-settle skipped — no valid recipient address");
+  if (!p || p.action !== "SEND") {
+    console.log("[settle] ABORT: Not a SEND action");
     return;
   }
 
   storeUpdateStatus(event.id, "processing");
+  console.log("[settle] Status updated to processing");
+
+  // Need a valid recipient address for auto-settlement
+  console.log(`[settle] Resolving recipient: ${p.recipient}`);
+  const resolvedRecipient = await resolveRecipient(p.recipient);
+  if (!resolvedRecipient) {
+    console.log("[settle] ABORT: Could not resolve recipient");
+    storeUpdateStatus(event.id, "failed");
+    return;
+  }
+  console.log(`[settle] Resolved to: ${resolvedRecipient}`);
 
   try {
     const provider = new ethers.JsonRpcProvider(RPC_URL);
@@ -61,37 +104,36 @@ async function settleOnChain(event: SmsEvent): Promise<void> {
 
     const currency = p.currency ?? "HSP";
     const useHSP   = currency !== "HSK";
-    const recipient = p.recipient!;
+    const recipient = resolvedRecipient;
 
     // Convert amount
-    let amount: bigint;
-    if (currency === "HSP" || currency === "HSK") {
-      const val = p.amount && p.amount > 0 ? p.amount : 1;
-      amount = ethers.parseEther(val.toFixed(6));
-    } else {
-      const val = p.amount && p.amount > 0 ? p.amount : 1;
-      const hspAmt = currency === "FBU" ? val * 0.00035 : val;
-      amount = ethers.parseEther(Math.max(hspAmt, 0.000001).toFixed(6));
-    }
+    const val = p.amount && p.amount > 0 ? p.amount : 1;
+    const amount = ethers.parseEther(val.toFixed(6));
+
+    console.log(`[settle] Preparing ${useHSP ? "HSP" : "HSK"} transaction...`);
 
     let tx;
     if (useHSP) {
-      // Approve then transfer
+      console.log("[settle] Sending HSP Approval...");
       const approveTx = await hsp.approve(CONTRACT_ADDRESS, amount);
+      console.log(`[settle] Approval sent: ${approveTx.hash}. Waiting for confirmation...`);
       await approveTx.wait();
+      console.log("[settle] Approval confirmed. Sending logPaymentHSP...");
       tx = await contract.logPaymentHSP(recipient, amount, currency, event.message);
     } else {
+      console.log("[settle] Sending logPaymentHSK...");
       tx = await contract.logPaymentHSK(recipient, amount, currency, event.message, { value: amount });
     }
 
+    console.log(`[settle] TX sent: ${tx.hash}. Waiting for finality...`);
     const receipt = await tx.wait();
     const ok = receipt?.status === 1;
 
     storeUpdateStatus(event.id, ok ? "settled" : "failed", tx.hash);
-    console.log(`[webhook] Auto-settled: ${tx.hash} status=${ok ? "settled" : "failed"}`);
+    console.log(`[settle] COMPLETED: ${tx.hash} status=${ok ? "settled" : "failed"}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown";
-    console.error("[webhook] Auto-settle error:", msg);
+    console.error("[settle] FATAL ERROR:", msg);
     storeUpdateStatus(event.id, "failed");
   }
 }
@@ -115,13 +157,21 @@ export async function POST(request: Request) {
     }
 
     // Parse intent
-    const baseUrl  = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+    const host = request.headers.get("host") ?? "localhost:3000";
+    const protocol = host.includes("localhost") ? "http" : "https";
+    const baseUrl = `${protocol}://${host}`;
+    
+    console.log(`[webhook] Calling parse-intent at: ${baseUrl}/api/parse-intent`);
+    
     const parseRes = await fetch(`${baseUrl}/api/parse-intent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ smsText: message }),
     });
 
+    if (!parseRes.ok) {
+      console.error(`[webhook] parse-intent failed with status: ${parseRes.status}`);
+    }
     const parsed = parseRes.ok ? (await parseRes.json()) as SmsEvent["parsed"] : null;
 
     const event: SmsEvent = {
@@ -135,9 +185,10 @@ export async function POST(request: Request) {
 
     pushEvent(event);
 
-    // Auto-settle in background — don't await, return SMS reply immediately
+    // Auto-settle — await it so Vercel doesn't kill it before completion
+    console.log("[webhook] parsed:", parsed?.action, "| fraud:", parsed?.fraud?.level, "| recipient:", parsed?.recipient);
     if (parsed?.action === "SEND" && parsed.fraud?.level !== "danger") {
-      void settleOnChain(event);
+      await settleOnChain(event);
     }
 
     // Build SMS reply
